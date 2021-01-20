@@ -31,13 +31,13 @@ program fem2d
     integer:: xbt, ybt
   end type node
 
-  !全節点数と全要素数
+  !全節点数と全要素数と計算する応力点数(要素ごと)
   integer:: i, j
-  integer:: el, no
+  integer:: el, no, st
   integer:: iargc
   integer:: count
   character(256):: filename
-  double precision:: pivot
+  double precision:: pivot, factor
 
   double precision, allocatable:: dvec(:) !節点変位ベクトル
   double precision, allocatable:: kmat(:, :) !剛性マトリックス
@@ -84,7 +84,6 @@ program fem2d
 
   !連立方程式を解く
   call solve(2*no, kmat, dvec, ddvec, ipiv)
-  !call gauss(2*no, kmat, dvec)
 
   !do i=1, 2*no
     !pivot = dvec(ipiv(2*no - i + 1))
@@ -92,7 +91,9 @@ program fem2d
     !dvec(2*no - i + 1) = pivot
   !end do
 
-  call print_result(no, el, nd, elem, ddvec)
+  factor = 0.0
+  call print_result(no, el, nd, elem, ddvec, factor)
+  call internal_info(no, el, nd, elem, ddvec, factor)
   stop
 
 contains
@@ -177,16 +178,17 @@ contains
     end if
   end subroutine read_data
 
-  subroutine print_result(no, el, nd, elem, dvec)
+  subroutine print_result(no, el, nd, elem, dvec, factor)
     implicit none
     integer, intent(in):: no, el
     type(node), intent(in):: nd(no)
     type(element), intent(in):: elem(el)
     double precision, intent(in):: dvec(2*no)
+    double precision, intent(inout):: factor
 
     integer:: i, j, ios, p
     double precision:: xmax = 0.0, xmin = 0.0, ymax = 0.0, ymin = 0.0
-    double precision:: factor = 0.0, d = 0.0, maxd = 0.0
+    double precision:: d = 0.0, maxd = 0.0
 
     open(iunit, iostat=ios, file="displ.txt", status="replace")
     write(*, *) "------displacement------"
@@ -240,10 +242,7 @@ contains
     !要素のループ
     do ie=1, el
       !dmatを作る
-      f = elem(ie)%ym/(1.0 - elem(ie)%po*elem(ie)%po)
-      dmat(1, 1) = f; dmat(1, 2) = elem(ie)%po*f; dmat(1, 3) = 0.0
-      dmat(2, 1) = elem(ie)%po*f; dmat(2, 2) = f; dmat(2, 3) = 0.0
-      dmat(3, 1) = 0.0; dmat(3, 2) = 0.0; dmat(3, 3) = ((1.0 - elem(ie)%po)/2.0)*f
+      call make_dmat(elem(ie), dmat)
 
       emat = 0.0; tmat = 0.0
       !積分ループ
@@ -280,6 +279,20 @@ contains
 
     end do
   end subroutine make_stiffness
+
+  subroutine make_dmat(nelem, dmat)
+    implicit none
+    type(element), intent(in):: nelem
+    double precision, intent(inout):: dmat(3, 3)
+
+    double precision:: f
+
+    f = nelem%ym/(1.0 - nelem%po*nelem%po)
+    dmat(1, 1) = f; dmat(1, 2) = nelem%po*f; dmat(1, 3) = 0.0
+    dmat(2, 1) = nelem%po*f; dmat(2, 2) = f; dmat(2, 3) = 0.0
+    dmat(3, 1) = 0.0; dmat(3, 2) = 0.0; dmat(3, 3) = ((1.0 - nelem%po)/2.0)*f
+
+  end subroutine make_dmat
 
   !bマトリックスを作る
   subroutine make_bmat(nelem, no, nd, xi, eta, bmat, det)
@@ -366,6 +379,99 @@ contains
     + (1.0 - x2)*eta(i)*(1.0 - xi2)/2.0 - neta*(1.0 + xxi)*(1.0 - yi2)
     return
   end function dndet
+
+  subroutine make_stress(s, no, nd, nelem, uvec, xi, eta)
+    implicit none
+    type(stress), intent(inout):: s
+    integer, intent(in):: no
+    type(node), intent(in):: nd(no)
+    type(element), intent(in):: nelem
+    double precision, intent(in):: uvec(16)
+    double precision, intent(in):: xi, eta
+
+    double precision:: jacobian(2, 2), bmat(3, 16), dmat(3, 3), db(3, 16)
+    double precision:: det
+    integer:: i, j
+
+    jacobian = 0.0
+
+    call make_dmat(nelem, dmat)
+    call make_bmat(nelem, no, nd, xi, eta, bmat, det)
+
+    s%xx = 0.0; s%yy = 0.0; s%xy = 0.0
+
+    db = matmul(dmat, bmat)
+
+    do i=1, 8
+      j = nelem%node(i)
+      s%xx = s%xx + db(1, 2*i-1)*uvec(2*j-1) + db(1, 2*i)*uvec(2*j)
+      s%yy = s%yy + db(2, 2*i-1)*uvec(2*j-1) + db(2, 2*i)*uvec(2*j)
+      s%xy = s%xy + db(3, 2*i-1)*uvec(2*j-1) + db(3, 2*i)*uvec(2*j)
+    end do
+  end subroutine make_stress
+
+  subroutine internal_info(no, el, nd, elem, uvec, factor)
+    implicit none
+    integer, intent(in):: no, el
+    type(node), intent(in):: nd(no)
+    type(element), intent(in):: elem(el)
+    double precision, intent(in):: uvec(16)
+    double precision, intent(in):: factor
+
+    integer:: i, j, k, ie, divi, p
+    double precision:: xi, eta, x, y, u, v
+    type(stress):: s
+
+    divi = 5
+
+    open(iunit, file="internal.txt", status="replace")
+    do ie=1, el
+      do i=-divi, divi
+        eta = dble(i)/dble(divi)
+        do j=-divi, divi
+          xi = dble(j)/dble(divi)
+          x = 0.0; y = 0.0; u = 0.0; v = 0.0
+          do k=1, 8
+            p = elem(ie)%node(k)
+            x = x + nd(p)%x*ni(k, xi, eta)
+            y = y + nd(p)%y*ni(k, xi, eta)
+            u = u + uvec(2*p-1)*ni(k, xi, eta)
+            v = v + uvec(2*p)*ni(k, xi, eta)
+          end do
+          call make_stress(s, no, nd, elem(ie), uvec, xi, eta)
+          write(iunit, *) "x=", x, "y=", y, "u=", u, "v=", v, "sx=", s%xx, "sy=", s%yy, "txy=", s%xy
+        end do
+        write(iunit, *) !splotのための空行
+      end do
+      write(iunit, *) !要素ごとの空行
+    end do
+    close(iunit)
+    open(iunit, file="gps.plot", status="replace")
+    write(iunit, *) "set grid"
+    write(iunit, *) "set pm3d"
+    write(iunit, *) "set pm3d map"
+    write(iunit, *) "set pm3d interpolate 3,3"
+    !write(iunit, *) "set format cb '%%4.1le{%%L}'"
+    write(iunit, *) "set size ratio -1"
+    write(iunit, *) "set view 0,0,1"
+    write(iunit, *) "set contour"
+    write(iunit, *) "set palette defined ( -1 '#000030', 0 '#000090', 1 '#000fff', 2 &
+    '#0090ff', 3 '#0fffee', 4 '#90ff70', 5 '#ffee00', 6 '#ff7000', 7 '#ee0000', 8 &
+    '#7f0000')"
+    write(iunit, *) "unset surface"
+    write(iunit, *) "unset key"
+    write(iunit, *) "f =", factor
+    write(iunit, *) "set title 'Sxx plot(deform. factor =", factor, ")'"
+    write(iunit, *) "splot 'internal.txt' u ($2+f*$6):($4+f*$8):($10) w l"
+    write(iunit, *) "pause -1"
+    write(iunit, *) "set title 'Syy plot (deform. factor =", factor, ")'"
+    write(iunit, *) "splot 'internal.txt' u ($2+f*$6):($4+f*$8):($12) w l"
+    write(iunit, *) "pause -1"
+    write(iunit, *) "set title 'Sxy plot (deform. factor =", factor, ")'"
+    write(iunit, *) "splot 'internal.txt' u ($2+f*$6):($4+f*$8):($14) w l"
+    write(iunit, *) "pause -1"
+    close(iunit)
+  end subroutine internal_info
 
   !境界条件の設定
   subroutine set_bc(no, el, nd, elem, kmat, dvec)
