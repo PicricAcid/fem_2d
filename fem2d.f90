@@ -93,6 +93,7 @@ program fem2d
 
   factor = 0.0
   call print_result(no, el, nd, elem, ddvec, factor)
+  call print_stress(no, el, nd, elem, ddvec)
   call internal_info(no, el, nd, elem, ddvec, factor)
   stop
 
@@ -238,13 +239,13 @@ contains
 
     !Kmat = \int{B^t D B}
     !init kmax
-    kmat = 0.0
+    kmat(:, :) = 0.0
     !要素のループ
     do ie=1, el
       !dmatを作る
       call make_dmat(elem(ie), dmat)
 
-      emat = 0.0; tmat = 0.0
+      emat(:, :) = 0.0; tmat(:, :) = 0.0
       !積分ループ
       do i=1, 4
         xi = gu(i)
@@ -264,18 +265,12 @@ contains
         p = elem(ie)%node(i)
         do j=1, 8
           q = elem(ie)%node(j)
-          kmat(2*p-1, 2*q-1) = kmat(2*p-1, 2*q-1) + tmat(2*i-1, 2*j-1)
-          kmat(2*p, 2*q-1) = kmat(2*p, 2*q-1) + tmat(2*i, 2*j-1)
-          kmat(2*p-1, 2*q) = kmat(2*p-1, 2*q) + tmat(2*i-1, 2*j)
-          kmat(2*p, 2*q) = kmat(2*p, 2*q) + tmat(2*i, 2*j)
+          kmat(2*q-1, 2*p-1) = kmat(2*q-1, 2*p-1) + tmat(2*j-1, 2*i-1)
+          kmat(2*q, 2*p-1) = kmat(2*q, 2*p-1) + tmat(2*j, 2*i-1)
+          kmat(2*q-1, 2*p) = kmat(2*q-1, 2*p) + tmat(2*j-1, 2*i)
+          kmat(2*q, 2*p) = kmat(2*q, 2*p) + tmat(2*j, 2*i)
         end do
       end do
-
-      open(iunit, file="test.txt", status="replace")
-      do i=1, 2*no
-        write(iunit, *) (kmat(i, j), j=1, 2*no)
-      end do
-      close(iunit)
 
     end do
   end subroutine make_stiffness
@@ -291,7 +286,6 @@ contains
     dmat(1, 1) = f; dmat(1, 2) = nelem%po*f; dmat(1, 3) = 0.0
     dmat(2, 1) = nelem%po*f; dmat(2, 2) = f; dmat(2, 3) = 0.0
     dmat(3, 1) = 0.0; dmat(3, 2) = 0.0; dmat(3, 3) = ((1.0 - nelem%po)/2.0)*f
-
   end subroutine make_dmat
 
   !bマトリックスを作る
@@ -304,12 +298,14 @@ contains
     double precision, intent(inout):: bmat(3, 16)
     double precision, intent(inout):: det
 
-    integer:: i, p
-    double precision:: jacobian(2, 2) = 0.0
+    integer:: i, j, p
+    double precision:: jacobian(2, 2)
     double precision:: dndx, dndy
 
     !dndx, dndyを計算する
     !jacobianを作る
+    jacobian(:, :) = 0.0
+
     do i=1, 8
       p = nelem%node(i)
       jacobian(1, 1) = jacobian(1, 1) + nd(p)%x * dndxi(i, xi, eta)
@@ -320,7 +316,7 @@ contains
     !(dndx, dndy)^t = J(dndxi, dndet)^t
     det = jacobian(1, 1)*jacobian(2, 2) - jacobian(1, 2)*jacobian(2, 1)
 
-    bmat = 0.0
+    bmat(:, :) = 0.0
     !bmatを作る
     do i=1, 8
       dndx = (jacobian(2, 2)*dndxi(i, xi, eta) - jacobian(1, 2)*dndet(i, xi, eta))/det
@@ -393,7 +389,7 @@ contains
     double precision:: det
     integer:: i, j
 
-    jacobian = 0.0
+    jacobian(:, :) = 0.0
 
     call make_dmat(nelem, dmat)
     call make_bmat(nelem, no, nd, xi, eta, bmat, det)
@@ -409,6 +405,33 @@ contains
       s%xy = s%xy + db(3, 2*i-1)*uvec(2*j-1) + db(3, 2*i)*uvec(2*j)
     end do
   end subroutine make_stress
+
+  subroutine print_stress(no, el, nd, elem, uvec)
+    implicit none
+    integer, intent(in):: no, el
+    type(node), intent(in):: nd(no)
+    type(element), intent(in):: elem(el)
+    double precision, intent(in):: uvec(16)
+
+    integer:: i, j, ie
+    double precision:: nxi, neta, x, y
+    type(stress):: s
+
+    write(*, *) "stress"
+    do ie=1, el
+      do i=1, 8
+        nxi = xi(i)
+        neta = eta(i)
+        call make_stress(s, no, nd, elem(ie), uvec, nxi, neta)
+        x = 0.0; y = 0.0
+        do j=1, 8
+          x = x + nd(elem(ie)%node(j))%x*ni(j, nxi, neta)
+          y = y + nd(elem(ie)%node(j))%y*ni(j, nxi, neta)
+        end do
+        write(*, *) ie, "x=", x, "y=", y, "sx=", s%xx, "sy=", s%yy, "txy=", s%xy
+      end do
+    end do
+  end subroutine print_stress
 
   subroutine internal_info(no, el, nd, elem, uvec, factor)
     implicit none
